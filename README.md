@@ -15,7 +15,7 @@
 
 思路与 [Better-Endfield](https://github.com/Dr-hydra/Better-Endfield) 的
 `native/loaders/shared/official_launcher.cpp` 一致，本仓库是一个**独立、零依赖、单文件**的
-最小实现（约 1300 行 C++20，不注入任何代码，不含 Better-Endfield 的任何模块；
+最小实现（约 1350 行 C++20，不注入任何代码，不含 Better-Endfield 的任何模块；
 Release 构建默认运行后不在系统里留下任何文件）。
 
 ---
