@@ -538,7 +538,8 @@ static bool LooksLikeSystemDir(const std::wstring& name) {
     static const wchar_t* blocked[] = {
         L"Windows", L"$Recycle.Bin", L"System Volume Information", L"Recovery",
         L"PerfLogs", L"Windows.old", L"node_modules", L".git", L"Temp", L"tmp",
-        L"Microsoft", L"Packages", L"WinSxS", L"ProgramData"};
+        L"Microsoft", L"Packages", L"WinSxS", L"ProgramData",
+        L"WindowsApps", L"SystemApps", L"$WinREAgent", L"Config.Msi"};
     for (const auto* blocked_name : blocked)
         if (IEquals(name, blocked_name)) return true;
     return false;
@@ -556,6 +557,12 @@ static void SearchDirectoryForGame(const fs::path& directory, int depth,
         std::error_code entryError;
         if (it->is_directory(entryError)) {
             if (LooksLikeSystemDir(name)) continue;
+            // junction / 符号链接（如 C:\Users\All Users）跳过：不重复遍历同一棵树，
+            // 也不会因为成环而把预算耗光。
+            const DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                continue;
             if (fs::is_regular_file(path / L"Endfield.exe", entryError))
                 found.push_back(path / L"Endfield.exe");
             if (depth > 0) SearchDirectoryForGame(path, depth - 1, budget, found);
@@ -568,8 +575,21 @@ static void SearchDirectoryForGame(const fs::path& directory, int depth,
 
 static fs::path FindGameExecutable() {
     std::vector<fs::path> found;
-    // 两个阶段共享同一份预算，保证最坏情况也是有限次目录枚举后返回。
-    int budget = 40000;
+    // 预算按“每个起点一份”发放：单个目录再大也不会把后面的起点饿死。
+    // 提权运行能枚举到 Program Files 下那些普通权限看不到的条目
+    // （以前 shared 一份预算时，C: 盘没扫完预算就光了，D:\Games 永远轮不到，
+    //  于是不带缓存启动会报“没有自动找到 Endfield.exe”）。
+    // budgetTotal 兜住最坏情况，仍然是有限次枚举。
+    constexpr int kBudgetPerRoot = 20000;
+    int budgetTotal = 120000;
+
+    auto scanFrom = [&](const fs::path& start, int depth) {
+        if (budgetTotal <= 0 || found.size() >= 8) return;
+        int budget = std::min(kBudgetPerRoot, budgetTotal);
+        const int granted = budget;
+        SearchDirectoryForGame(start, depth, budget, found);
+        budgetTotal -= granted - budget;   // 只扣真正用掉的部分
+    };
 
     // 1) 卸载表里名字带 Endfield 的条目
     constexpr wchar_t uninstall[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
@@ -577,7 +597,7 @@ static fs::path FindGameExecutable() {
         for (REGSAM view : {static_cast<REGSAM>(KEY_WOW64_64KEY),
                             static_cast<REGSAM>(KEY_WOW64_32KEY)}) {
             for (const auto& child : RegSubkeys(hive, uninstall, view)) {
-                if (budget <= 0) break;
+                if (budgetTotal <= 0) break;
                 const std::wstring key = std::wstring(uninstall) + L"\\" + child;
                 const auto name = RegRead(hive, key.c_str(), L"DisplayName", view);
                 if (name.empty()) continue;
@@ -592,7 +612,7 @@ static fs::path FindGameExecutable() {
                 if (fs::is_regular_file(directory / L"Endfield.exe", ec))
                     found.push_back(directory / L"Endfield.exe");
                 else
-                    SearchDirectoryForGame(directory, 3, budget, found);
+                    scanFrom(directory, 3);
             }
         }
     }
@@ -600,19 +620,27 @@ static fs::path FindGameExecutable() {
     // 2) 兜底：有限深度的目录扫描
     if (found.empty()) {
         std::vector<fs::path> startPoints;
+        // 非系统盘优先：游戏基本不装在 C:，先把 D:/E:/… 扫完，
+        // 系统盘上那些又大又没用的目录就影响不到结果。
+        for (wchar_t drive = L'D'; drive <= L'Z'; ++drive) {
+            wchar_t root[4] = {drive, L':', L'\\', L'\0'};
+            if (GetDriveTypeW(root) == DRIVE_FIXED) startPoints.emplace_back(root);
+        }
         for (const wchar_t* variable : {L"ProgramFiles", L"ProgramFiles(x86)", L"LOCALAPPDATA"}) {
             wchar_t value[32768]{};
             const DWORD length = GetEnvironmentVariableW(variable, value,
                 static_cast<DWORD>(std::size(value)));
             if (length && length < std::size(value)) startPoints.emplace_back(value);
         }
-        for (wchar_t drive = L'C'; drive <= L'Z'; ++drive) {
-            wchar_t root[4] = {drive, L':', L'\\', L'\0'};
-            if (GetDriveTypeW(root) == DRIVE_FIXED) startPoints.emplace_back(root);
+        {
+            wchar_t systemDrive[16]{};
+            const DWORD length = GetEnvironmentVariableW(L"SystemDrive", systemDrive,
+                static_cast<DWORD>(std::size(systemDrive)));
+            if (length && length < std::size(systemDrive))
+                startPoints.emplace_back(std::wstring(systemDrive) + L"\\");
         }
         for (const auto& start : startPoints) {
-            if (budget <= 0) break;
-            SearchDirectoryForGame(start, 3, budget, found);
+            scanFrom(start, 3);
             if (!found.empty()) break;
         }
     }

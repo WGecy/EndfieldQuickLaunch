@@ -183,9 +183,19 @@ exe 清单写的是 `requireAdministrator`，**双击就会弹 UAC**，点"是"�
 
 1. 配置文件里保存的路径
 2. 卸载表中名字含 `Endfield` / `终末地` 的条目，在其安装目录往下最多三层找 `Endfield.exe`
-3. 从 `%ProgramFiles%`、`%ProgramFiles(x86)%`、`%LOCALAPPDATA%` 和各固定磁盘根开始，深度 3 的有界扫描
+3. 从**非系统盘根**（`D:\`、`E:\` …）开始扫，再扫 `%ProgramFiles%`、
+   `%ProgramFiles(x86)%`、`%LOCALAPPDATA%`、`%SystemDrive%\`，深度 3 的有界扫描
 
-两个阶段**共用** 4 万次目录项的预算，最多收集 8 个候选；命中多个时取最近修改过的那份。
+扫描细节：
+
+- 每个起点单独给 2 万次目录项的预算，再加 12 万次的总上限：单个目录再大也不会把后面的起点饿死。
+  这一点很关键——**提权**运行时 `C:\Program Files` 下那些普通权限看不到的条目
+  （`WindowsApps` 里上百个 Appx 包等）都能枚举，旧的"全局共用 4 万"预算会在扫到 C: 盘时就用完，
+  于是不带缓存启动会误报"没有自动找到 Endfield.exe"。
+- 非系统盘排在系统盘前面，游戏基本不装在 C:。
+- 跳过 junction / 符号链接（如 `C:\Users\All Users`），既不重复遍历同一棵树，也不会因成环耗尽预算。
+- `Windows`、`WindowsApps`、`SystemApps`、`WinSxS`、`ProgramData`、`$Recycle.Bin` 等目录直接不进。
+- 最多收集 8 个候选；命中多个时取最近修改过的那份。
 
 ## 自动查找 + 校验的细节
 
