@@ -59,7 +59,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: EndfieldQuickLaunch-mingw-x64
-          path: EndfieldQuickLaunch.exe
+          path: |
+            EndfieldQuickLaunch.exe
+            EndfieldQuickLaunch-debug.exe
           if-no-files-found: error
 
   release:
@@ -75,4 +77,6 @@ jobs:
           name: EndfieldQuickLaunch-mingw-x64
       - uses: softprops/action-gh-release@v2
         with:
-          files: EndfieldQuickLaunch.exe
+          files: |
+            EndfieldQuickLaunch.exe
+            EndfieldQuickLaunch-debug.exe

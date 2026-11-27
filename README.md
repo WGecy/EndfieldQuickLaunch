@@ -84,6 +84,8 @@ g++ -std=c++20 -O2 -municode -mwindows -DUNICODE -D_UNICODE ^
 所以 Release 里连 `config.ini` / `last-run.log` 这些字符串都不存在。代价是 Release 每次启动
 都要重新自动扫描（本机实测 2–3 秒），Debug 则会把路径缓存下来，下次直接命中。
 
+GitHub Release 里两个 exe 都会附上；日常用 Release 那个，遇到问题再换 Debug 那个跑一遍看日志。
+
 两个关键编译选项：
 
 - `-mwindows` —— GUI 子系统，双击**不会闪出黑色控制台窗口**，程序全程不弹任何对话框。
