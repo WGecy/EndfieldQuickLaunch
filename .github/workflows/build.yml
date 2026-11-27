@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mingw:
+    name: MinGW-w64 (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install MinGW-w64
+        shell: pwsh
+        run: |
+          choco install mingw --no-progress -y
+          "C:\ProgramData\mingw64\mingw64\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Show toolchain version
+        run: |
+          g++ --version
+          windres --version
+
+      - name: Build
+        run: cmd /c build.bat
+
+      - name: Verify artifact
+        shell: pwsh
+        run: |
+          if (-not (Test-Path EndfieldQuickLaunch.exe)) { throw "exe not produced" }
+          $f = Get-Item EndfieldQuickLaunch.exe
+          "size = $($f.Length) bytes"
+          # sanity: must be a PE image
+          $fs = [System.IO.File]::OpenRead($f.FullName)
+          $buf = New-Object byte[] 2
+          $null = $fs.Read($buf, 0, 2)
+          $fs.Close()
+          if ($buf[0] -ne 0x4D -or $buf[1] -ne 0x5A) { throw "not an MZ image" }
+
+      - name: Self-check (parent process spoofing)
+        run: |
+          cd test
+          cmd /c build.bat
+          .\selfcheck.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: EndfieldQuickLaunch-mingw-x64
+          path: EndfieldQuickLaunch.exe
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: mingw
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: EndfieldQuickLaunch-mingw-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: EndfieldQuickLaunch.exe

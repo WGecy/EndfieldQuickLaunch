@@ -1,0 +1,24 @@
+# Build artifacts
+*.exe
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+build/
+dist/
+
+# Local config / logs
+config.ini
+last-run.log
+*.log
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+Thumbs.db
+desktop.ini
