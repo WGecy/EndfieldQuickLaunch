@@ -31,9 +31,17 @@ jobs:
       - name: Verify artifact
         shell: pwsh
         run: |
-          if (-not (Test-Path EndfieldQuickLaunch.exe)) { throw "exe not produced" }
+          if (-not (Test-Path EndfieldQuickLaunch.exe)) { throw "release exe not produced" }
+          if (-not (Test-Path EndfieldQuickLaunch-debug.exe)) { throw "debug exe not produced" }
           $f = Get-Item EndfieldQuickLaunch.exe
-          "size = $($f.Length) bytes"
+          "release size = $($f.Length) bytes"
+          "debug   size = $((Get-Item EndfieldQuickLaunch-debug.exe).Length) bytes"
+          # release must not carry any disk-writing code path at all
+          $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+          $text = [System.Text.Encoding]::Unicode.GetString($bytes)
+          foreach ($needle in @('last-run.log','config.ini')) {
+            if ($text.Contains($needle)) { throw "release build still contains '$needle'" }
+          }
           # sanity: must be a PE image
           $fs = [System.IO.File]::OpenRead($f.FullName)
           $buf = New-Object byte[] 2

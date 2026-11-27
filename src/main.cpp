@@ -33,14 +33,28 @@
 
 namespace fs = std::filesystem;
 
+// ------------------------------------------------ Release / Debug 两个构建
+//
+// Release（默认，EndfieldQuickLaunch.exe）：一个字节都不写盘 —— 没有 last-run.log，
+//         也没有 config.ini，跑完系统里不留任何痕迹。
+// Debug  （-DEQL_DEBUG，EndfieldQuickLaunch-debug.exe）：这两样都写，方便排查。
+// 写盘代码在 Release 里根本不参与编译（不是运行期判断），所以不存在漏写的可能。
+#ifdef EQL_DEBUG
+#define EQL_DISK 1
+#else
+#define EQL_DISK 0
+#endif
+
 // ---------------------------------------------------------------- 控制台输出
 //
 // 本程序以 GUI 子系统编译（双击运行不会有黑框），所以输出分三种情况：
 //   1. 已经连着控制台（从 cmd / PowerShell 启动）-> 直接 WriteConsoleW
 //   2. 标准输出被重定向到文件 / 管道  -> 写 UTF-8 字节
-//   3. 什么都没有（双击启动）        -> 先缓存，退出时写 %LOCALAPPDATA% 下的 last-run.log
+//   3. 什么都没有（双击启动）        -> 直接丢弃；Debug 构建缓存后写 last-run.log
 static bool g_hasConsole = false;
+#if EQL_DISK
 static std::wstring g_captured;
+#endif
 
 static std::string ToUtf8(const std::wstring& text) {
     if (text.empty()) return std::string();
@@ -65,7 +79,8 @@ static void InitOutput() {
         const DWORD type = GetFileType(output);
         if (type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE) return;  // 重定向，直接写句柄
     }
-    // 双击启动时父进程（explorer）没有控制台，这里会失败，于是退化为只写日志。
+    // 双击启动时父进程（explorer）没有控制台，这里会失败：Debug 构建退化为只写日志，
+    // Release 构建则什么都不写。
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
     const HANDLE console = CreateFileW(L"CONOUT$",
         GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -92,11 +107,14 @@ static void Print(const std::wstring& text) {
         WriteFile(output, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
         return;
     }
+#if EQL_DISK
     g_captured += text;   // 没地方可写（或控制台写失败）就先存着，退出时落日志
+#endif
 }
 
 static void PrintLine(const std::wstring& text = L"") { Print(text + L"\n"); }
 
+#if EQL_DISK
 // 双击启动时没有任何窗口：把这次运行的输出落到日志文件里，方便排查。
 // 任何时候都不弹窗（成功失败都静默），需要看输出时从 cmd / PowerShell 运行，
 // 或者打开 %LOCALAPPDATA%\EndfieldQuickLaunch\last-run.log。
@@ -117,11 +135,14 @@ static void WriteRunLog(const std::wstring& text) {
     if (!utf8.empty()) fwrite(utf8.data(), 1, utf8.size(), stream);
     fclose(stream);
 }
+#endif
 
 static int Finish(int code) {
+#if EQL_DISK
     // 控制台正常时 g_captured 一直是空的，只有"没地方显示"的那部分内容才会落到日志里。
     if (!g_captured.empty()) WriteRunLog(g_captured);
     g_captured.clear();
+#endif
     return code;
 }
 
@@ -613,6 +634,10 @@ static fs::path FindGameExecutable() {
 }
 
 // ---------------------------------------------------------------- 配置文件
+//
+// 只有 Debug 构建才读写这份缓存；Release 构建连下面这段代码都不编译。
+
+#if EQL_DISK
 
 static fs::path SettingsDirectory() {
     wchar_t buffer[32768]{};
@@ -645,6 +670,15 @@ static void WriteConfig(const wchar_t* key, const std::wstring& value) {
     if (path.empty()) return;
     WritePrivateProfileStringW(L"Launch", key, value.c_str(), path.c_str());
 }
+
+#else
+
+// Release：不读也不写配置。ReadConfig 一律返回空，即每次启动都重新自动扫描；
+// WriteConfig 什么都不做，%LOCALAPPDATA% 下不会出现 EndfieldQuickLaunch 目录。
+static std::wstring ReadConfig(const wchar_t*) { return {}; }
+static void WriteConfig(const wchar_t*, const std::wstring&) {}
+
+#endif
 
 // -------------------------------------------------------------- 进程操作封装
 
@@ -899,7 +933,12 @@ static void PrintUsage() {
     PrintLine(L"  EndfieldQuickLaunch.exe --game \"D:\\Games\\Endfield\\Endfield.exe\"");
     PrintLine(L"  EndfieldQuickLaunch.exe --dry-run");
     PrintLine();
-    PrintLine(L"配置保存在 %LOCALAPPDATA%\\EndfieldQuickLaunch\\config.ini");
+#if EQL_DISK
+    PrintLine(L"Debug 构建：配置保存在 %LOCALAPPDATA%\\EndfieldQuickLaunch\\config.ini，"
+              L"运行日志写在同目录的 last-run.log。");
+#else
+    PrintLine(L"Release 构建：不写日志、不写配置，运行后不在系统里留下任何文件。");
+#endif
 }
 
 static bool ParseOptions(int argc, wchar_t** argv, Options& options,

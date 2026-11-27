@@ -15,7 +15,8 @@
 
 思路与 [Better-Endfield](https://github.com/Dr-hydra/Better-Endfield) 的
 `native/loaders/shared/official_launcher.cpp` 一致，本仓库是一个**独立、零依赖、单文件**的
-最小实现（约 1200 行 C++20，不注入任何代码，不含 Better-Endfield 的任何模块）。
+最小实现（约 1300 行 C++20，不注入任何代码，不含 Better-Endfield 的任何模块；
+Release 构建运行后不在系统里留下任何文件）。
 
 ---
 
@@ -69,8 +70,19 @@ g++ -std=c++20 -O2 -municode -mwindows -DUNICODE -D_UNICODE ^
     -lwintrust -lcrypt32 -lshell32 -ladvapi32 -lversion
 ```
 
-产物是**单个自包含 exe**（静态链接 libstdc++ / libgcc / winpthread），只依赖系统自带的
+两个产物是**各自自包含的单个 exe**（静态链接 libstdc++ / libgcc / winpthread），只依赖系统自带的
 `KERNEL32` / `ADVAPI32` / `CRYPT32` / `WINTRUST` / `SHELL32`，加上 Windows 10/11 必有的 UCRT。
+
+`build.bat` 一次编译出两个版本：
+
+| 产物 | 构建方式 | 行为 |
+|---|---|---|
+| `EndfieldQuickLaunch.exe` | 默认 | **Release：一个字节都不写盘**，不写日志也不写配置，运行后系统里不留任何文件 |
+| `EndfieldQuickLaunch-debug.exe` | 额外加 `-DEQL_DEBUG` | **Debug：写 `last-run.log` 与 `config.ini`**，用于排查问题 |
+
+两者的差别是编译期的：`#if EQL_DISK` 把写盘代码整段排除在 Release 之外（不是运行期开关），
+所以 Release 里连 `config.ini` / `last-run.log` 这些字符串都不存在。代价是 Release 每次启动
+都要重新自动扫描（本机实测 2–3 秒），Debug 则会把路径缓存下来，下次直接命中。
 
 两个关键编译选项：
 
@@ -118,16 +130,17 @@ EndfieldQuickLaunch.exe -- -force-d3d11
 | `--force` | 签名验证失败也继续 |
 | `-h` / `--help` | 帮助 |
 
-游戏路径与启动器路径自动保存到 `%LOCALAPPDATA%\EndfieldQuickLaunch\config.ini`，下次直接双击即可。
+Debug 构建会把游戏路径与启动器路径缓存到 `%LOCALAPPDATA%\EndfieldQuickLaunch\config.ini`；
+Release 构建不保存任何东西，每次都重新自动查找。
 
 ### 双击使用 / 输出去哪了
 
 exe 清单写的是 `requireAdministrator`，**双击就会弹 UAC**，点"是"即可，不需要右键"以管理员身份运行"。
 程序是 GUI 子系统，**不显示控制台、不弹任何提示框**。
 
-- 从 cmd / PowerShell（管理员）运行时，输出正常打到控制台。
-- 双击运行时没有窗口，本次运行的输出写到 `%LOCALAPPDATA%\EndfieldQuickLaunch\last-run.log`
-  （UTF-8 带 BOM，记事本直接可读）。
+- 从 cmd / PowerShell（管理员）运行时，两个版本都正常打到控制台。
+- 双击运行时没有窗口：**Release 什么都不留**；**Debug** 把本次输出写到
+  `%LOCALAPPDATA%\EndfieldQuickLaunch\last-run.log`（UTF-8 带 BOM，记事本直接可读）。
 - 想只看诊断不启动游戏：给快捷方式加 `--diagnose`，或 `EndfieldQuickLaunch.exe --diagnose > diag.txt`。
 
 ## 自动查找逻辑
