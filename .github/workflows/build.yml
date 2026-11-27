@@ -36,12 +36,11 @@ jobs:
           $f = Get-Item EndfieldQuickLaunch.exe
           "release size = $($f.Length) bytes"
           "debug   size = $((Get-Item EndfieldQuickLaunch-debug.exe).Length) bytes"
-          # release must not carry any disk-writing code path at all
+          # release must not carry the run-log writer at all
+          # (config.ini is expected: --config is an opt-in portable cache in both builds)
           $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
           $text = [System.Text.Encoding]::Unicode.GetString($bytes)
-          foreach ($needle in @('last-run.log','config.ini')) {
-            if ($text.Contains($needle)) { throw "release build still contains '$needle'" }
-          }
+          if ($text.Contains('last-run.log')) { throw "release build still contains 'last-run.log'" }
           # sanity: must be a PE image
           $fs = [System.IO.File]::OpenRead($f.FullName)
           $buf = New-Object byte[] 2

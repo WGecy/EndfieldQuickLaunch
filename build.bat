@@ -36,7 +36,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem Debug build only difference: -DEQL_DEBUG turns on last-run.log and config.ini writing.
+rem Debug build only difference: -DEQL_DEBUG turns on last-run.log and the LOCALAPPDATA
+rem config cache. The --config portable cache works in both builds.
 echo [3/3] Linking EndfieldQuickLaunch-debug.exe - Debug build, writes log and config ...
 g++ %CXXFLAGS% -DEQL_DEBUG -o EndfieldQuickLaunch-debug.exe src\main.cpp manifest_res.o %LIBS%
 if errorlevel 1 (
@@ -46,6 +47,6 @@ if errorlevel 1 (
 )
 
 del /q manifest_res.o >nul 2>nul
-echo [OK] EndfieldQuickLaunch.exe          - no log, no config, no leftovers.
-echo [OK] EndfieldQuickLaunch-debug.exe    - writes last-run.log and config.ini.
+echo [OK] EndfieldQuickLaunch.exe          - no log, no config unless --config.
+echo [OK] EndfieldQuickLaunch-debug.exe    - writes last-run.log, caches config in LOCALAPPDATA.
 endlocal

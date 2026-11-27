@@ -35,10 +35,11 @@ namespace fs = std::filesystem;
 
 // ------------------------------------------------ Release / Debug 两个构建
 //
-// Release（默认，EndfieldQuickLaunch.exe）：一个字节都不写盘 —— 没有 last-run.log，
-//         也没有 config.ini，跑完系统里不留任何痕迹。
-// Debug  （-DEQL_DEBUG，EndfieldQuickLaunch-debug.exe）：这两样都写，方便排查。
-// 写盘代码在 Release 里根本不参与编译（不是运行期判断），所以不存在漏写的可能。
+// Release（默认，EndfieldQuickLaunch.exe）：默认一个字节都不写盘 —— 没有 last-run.log，
+//         也没有 config.ini；只有显式加 --config 时才在 exe 同目录读写 config.ini。
+// Debug  （-DEQL_DEBUG，EndfieldQuickLaunch-debug.exe）：日志和 %LOCALAPPDATA% 下的配置
+//         都写，方便排查；同样可以用 --config 改成便携模式。
+// 日志部分在 Release 里根本不参与编译（不是运行期判断），所以不存在漏写的可能。
 #ifdef EQL_DEBUG
 #define EQL_DISK 1
 #else
@@ -635,50 +636,48 @@ static fs::path FindGameExecutable() {
 
 // ---------------------------------------------------------------- 配置文件
 //
-// 只有 Debug 构建才读写这份缓存；Release 构建连下面这段代码都不编译。
+// 缓存位置只由 --config 决定，两个构建行为一致：
+//   加了 --config -> exe 同目录的 config.ini（便携模式，双击/快捷方式都能带上）
+//   没加          -> Debug 用 %LOCALAPPDATA%\EndfieldQuickLaunch\config.ini；
+//                    Release 什么都不读写，每次都重新自动扫描。
+// g_configPath 为空是统一的“不启用缓存”状态，所有读写都在这里短路。
 
-#if EQL_DISK
-
-static fs::path SettingsDirectory() {
-    wchar_t buffer[32768]{};
-    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer,
-        static_cast<DWORD>(std::size(buffer)));
-    if (length == 0 || length >= std::size(buffer)) return {};
-    return fs::path(buffer) / L"EndfieldQuickLaunch";
-}
-
-static fs::path ConfigPath() {
-    const auto directory = SettingsDirectory();
-    return directory.empty() ? fs::path() : directory / L"config.ini";
-}
+static fs::path g_configPath;
 
 static std::wstring ReadConfig(const wchar_t* key) {
-    const auto path = ConfigPath();
-    if (path.empty()) return {};
+    if (g_configPath.empty()) return {};
     wchar_t buffer[32768]{};
     GetPrivateProfileStringW(L"Launch", key, L"", buffer,
-        static_cast<DWORD>(std::size(buffer)), path.c_str());
+        static_cast<DWORD>(std::size(buffer)), g_configPath.c_str());
     return buffer;
 }
 
+// WritePrivateProfileStringW 会在文件不存在时自动新建（含父目录），
+// 所以“没有 config.ini 就按这次找到的路径建一个”不需要额外代码。
 static void WriteConfig(const wchar_t* key, const std::wstring& value) {
-    const auto directory = SettingsDirectory();
-    if (directory.empty()) return;
+    if (g_configPath.empty()) return;
     std::error_code ec;
-    fs::create_directories(directory, ec);
-    const auto path = ConfigPath();
-    if (path.empty()) return;
-    WritePrivateProfileStringW(L"Launch", key, value.c_str(), path.c_str());
+    fs::create_directories(g_configPath.parent_path(), ec);
+    if (!WritePrivateProfileStringW(L"Launch", key, value.c_str(), g_configPath.c_str()))
+        PrintLine(L"[!] 配置写入失败 (Win32 " + std::to_wstring(GetLastError()) +
+            L")：" + g_configPath.wstring());
 }
 
-#else
-
-// Release：不读也不写配置。ReadConfig 一律返回空，即每次启动都重新自动扫描；
-// WriteConfig 什么都不做，%LOCALAPPDATA% 下不会出现 EndfieldQuickLaunch 目录。
-static std::wstring ReadConfig(const wchar_t*) { return {}; }
-static void WriteConfig(const wchar_t*, const std::wstring&) {}
-
+static void InitConfig(bool portable) {
+    if (portable) {
+        const auto self = ModulePath();
+        if (self.empty()) return;
+        g_configPath = self.parent_path() / L"config.ini";
+        return;
+    }
+#if EQL_DISK
+    wchar_t buffer[32768]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer,
+        static_cast<DWORD>(std::size(buffer)));
+    if (length == 0 || length >= std::size(buffer)) return;
+    g_configPath = fs::path(buffer) / L"EndfieldQuickLaunch" / L"config.ini";
 #endif
+}
 
 // -------------------------------------------------------------- 进程操作封装
 
@@ -908,6 +907,7 @@ struct Options {
     bool noWait = false;
     bool force = false;
     bool help = false;
+    bool config = false;
     DWORD injectTimeoutMs = 90000;
 };
 
@@ -921,6 +921,7 @@ static void PrintUsage() {
     PrintLine(L"  --no-parent        不伪造父进程，直接启动（仅适用于不校验的版本）");
     PrintLine(L"  --inject <dll>     启动后向游戏注入指定 DLL（可选）");
     PrintLine(L"  --inject-timeout <毫秒>  等待 GameAssembly.dll 的最长时间，默认 90000");
+    PrintLine(L"  --config           读写 exe 同目录的 config.ini，缓存游戏/启动器路径");
     PrintLine(L"  --steam            设置 Steam 环境变量（覆盖层需自行处理）");
     PrintLine(L"  --diagnose         只诊断：列出找到的启动器、签名、游戏路径，不启动");
     PrintLine(L"  --dry-run          打印将要执行的命令行，不实际启动");
@@ -934,10 +935,11 @@ static void PrintUsage() {
     PrintLine(L"  EndfieldQuickLaunch.exe --dry-run");
     PrintLine();
 #if EQL_DISK
-    PrintLine(L"Debug 构建：配置保存在 %LOCALAPPDATA%\\EndfieldQuickLaunch\\config.ini，"
-              L"运行日志写在同目录的 last-run.log。");
+    PrintLine(L"Debug 构建：配置与日志默认在 %LOCALAPPDATA%\\EndfieldQuickLaunch\\，"
+              L"加 --config 则改用 exe 同目录的 config.ini。");
 #else
-    PrintLine(L"Release 构建：不写日志、不写配置，运行后不在系统里留下任何文件。");
+    PrintLine(L"Release 构建：不写日志；不加 --config 时不读写任何配置，"
+              L"运行后不在系统里留下任何文件。");
 #endif
 }
 
@@ -978,6 +980,7 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& options,
         else if (option == L"--diagnose") options.diagnose = true;
         else if (option == L"--no-wait") options.noWait = true;
         else if (option == L"--force") options.force = true;
+        else if (option == L"--config") options.config = true;
         else if (option == L"-h" || option == L"--help" || option == L"/?") options.help = true;
         else { error = L"未知参数: " + option; return false; }
     }
@@ -1032,8 +1035,11 @@ static int RunMain(int argc, wchar_t** argv) {
     }
     if (options.help) { PrintUsage(); return 0; }
 
+    InitConfig(options.config);
+
     PrintLine(L"=== Endfield Quick Launch ===");
     PrintLine(std::wstring(L"当前权限: ") + (IsElevated() ? L"管理员" : L"普通用户"));
+    if (!g_configPath.empty()) PrintLine(L"配置文件: " + g_configPath.wstring());
     PrintLine();
 
     // ---- 1. 找游戏

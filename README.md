@@ -16,7 +16,7 @@
 思路与 [Better-Endfield](https://github.com/Dr-hydra/Better-Endfield) 的
 `native/loaders/shared/official_launcher.cpp` 一致，本仓库是一个**独立、零依赖、单文件**的
 最小实现（约 1300 行 C++20，不注入任何代码，不含 Better-Endfield 的任何模块；
-Release 构建运行后不在系统里留下任何文件）。
+Release 构建默认运行后不在系统里留下任何文件）。
 
 ---
 
@@ -77,12 +77,15 @@ g++ -std=c++20 -O2 -municode -mwindows -DUNICODE -D_UNICODE ^
 
 | 产物 | 构建方式 | 行为 |
 |---|---|---|
-| `EndfieldQuickLaunch.exe` | 默认 | **Release：一个字节都不写盘**，不写日志也不写配置，运行后系统里不留任何文件 |
-| `EndfieldQuickLaunch-debug.exe` | 额外加 `-DEQL_DEBUG` | **Debug：写 `last-run.log` 与 `config.ini`**，用于排查问题 |
+| `EndfieldQuickLaunch.exe` | 默认 | **Release：默认不写盘** —— 不写日志、不写配置，运行后系统里不留任何文件；只有加了 `--config` 才在 exe 同目录读写 `config.ini` |
+| `EndfieldQuickLaunch-debug.exe` | 额外加 `-DEQL_DEBUG` | **Debug：写 `last-run.log`**，配置默认缓存在 `%LOCALAPPDATA%`；同样可以用 `--config` 换成便携模式 |
 
-两者的差别是编译期的：`#if EQL_DISK` 把写盘代码整段排除在 Release 之外（不是运行期开关），
-所以 Release 里连 `config.ini` / `last-run.log` 这些字符串都不存在。代价是 Release 每次启动
-都要重新自动扫描（本机实测 2–3 秒），Debug 则会把路径缓存下来，下次直接命中。
+日志是编译期的差别：`#if EQL_DISK` 把写日志那整段代码排除在 Release 之外（不是运行期开关），
+所以 Release 里连 `last-run.log` 这个字符串都不存在。
+
+配置缓存的位置则由运行参数 `--config` 决定，两个构建行为一致（见下面的「便携模式」）。
+不加 `--config` 时，Release 不缓存任何东西、每次启动都要重新自动扫描（本机实测 2–3 秒），
+Debug 则用 `%LOCALAPPDATA%` 下的缓存，下次直接命中。
 
 GitHub Release 里两个 exe 都会附上；日常用 Release 那个，遇到问题再换 Debug 那个跑一遍看日志。
 
@@ -125,6 +128,7 @@ EndfieldQuickLaunch.exe -- -force-d3d11
 | `--no-parent` / `--direct-launch` | 不伪造父进程直接启动（只对不做校验的版本有效） |
 | `--inject <dll>` | 启动后等 `GameAssembly.dll` 就绪，再远程线程 `LoadLibraryW` 注入 |
 | `--inject-timeout <毫秒>` | 等待 `GameAssembly.dll` 的上限，默认 `90000`，有效范围 `0`–`3600000`；`0` = 不等待立即注入 |
+| `--config` | 读写 **exe 同目录**的 `config.ini`，把游戏/启动器路径缓存下来（两个构建都支持） |
 | `--steam` | 设置 `SteamOverlayGameId` / `SteamAppId` / `SteamGameId` = `4732690` |
 | `--diagnose` | 只诊断，不启动，也不写配置 |
 | `--dry-run` | 打印将要执行的命令行，不启动，也不写配置 |
@@ -132,8 +136,26 @@ EndfieldQuickLaunch.exe -- -force-d3d11
 | `--force` | 签名验证失败也继续 |
 | `-h` / `--help` | 帮助 |
 
-Debug 构建会把游戏路径与启动器路径缓存到 `%LOCALAPPDATA%\EndfieldQuickLaunch\config.ini`；
-Release 构建不保存任何东西，每次都重新自动查找。
+不加 `--config` 时：Debug 构建把游戏路径与启动器路径缓存到
+`%LOCALAPPDATA%\EndfieldQuickLaunch\config.ini`，Release 构建不保存任何东西，每次都重新自动查找。
+
+### 便携模式（`--config`）
+
+加上 `--config`，两个构建都改成读写 **exe 同目录**的 `config.ini`：
+
+```cmd
+:: 第一次：指定游戏路径，顺手写进 exe 旁边的 config.ini
+EndfieldQuickLaunch.exe --config --game "D:\Games\Endfield\Endfield.exe"
+
+:: 之后：直接跑，路径从 config.ini 里读
+EndfieldQuickLaunch.exe --config
+```
+
+`config.ini` 不存在时会自动新建（父目录也会一并创建）；`--config` 只影响缓存位置，
+不会把 Release 变成"偷偷写 `%LOCALAPPDATA%`"。把 exe 和 `config.ini` 一起拷到别处仍然可用，
+这是把启动器塞进随身盘或固定目录的用法。
+
+注意 `--config` 是**每次都要带上**的：它不是一个记忆开关，程序不会把"要用便携配置"这件事记在别处。
 
 ### 双击使用 / 输出去哪了
 
@@ -141,7 +163,8 @@ exe 清单写的是 `requireAdministrator`，**双击就会弹 UAC**，点"是"�
 程序是 GUI 子系统，**不显示控制台、不弹任何提示框**。
 
 - 从 cmd / PowerShell（管理员）运行时，两个版本都正常打到控制台。
-- 双击运行时没有窗口：**Release 什么都不留**；**Debug** 把本次输出写到
+- 双击运行时没有窗口：**Release 什么都不留**（除非带了 `--config`，那会更新 exe 旁边的
+  `config.ini`）；**Debug** 把本次输出写到
   `%LOCALAPPDATA%\EndfieldQuickLaunch\last-run.log`（UTF-8 带 BOM，记事本直接可读）。
 - 想只看诊断不启动游戏：给快捷方式加 `--diagnose`，或 `EndfieldQuickLaunch.exe --diagnose > diag.txt`。
 
@@ -243,6 +266,8 @@ match=1
 - `--inject` 要求目标进程与本程序位数一致；本程序为 x64，32 位游戏无法注入，会明确报错。
 - 自动查找命中**多个**游戏时取最近修改过的那份；也可用 `--game` 显式指定。
 - `--no-wait` 的看护进程按 PID 等待游戏退出；极端情况下若有 PID 复用，会多等一段时间。
+- `--config` 要往 exe 所在目录写 `config.ini`。放在 `Program Files` 这类普通用户无写权限的位置时，
+  因为程序本身就以管理员运行通常没问题；若写入失败会打印 `[!] 配置写入失败`，其余功能不受影响。
 - 只在 Windows 10/11 x64 上测试过。
 
 ## 退出码
