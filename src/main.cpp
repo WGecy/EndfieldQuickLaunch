@@ -33,29 +33,24 @@
 
 namespace fs = std::filesystem;
 
-// ------------------------------------------------ Release / Debug 两个构建
+// --------------------------------------------------- 写盘行为（只有一个构建）
 //
-// Release（默认，EndfieldQuickLaunch.exe）：默认一个字节都不写盘 —— 没有 last-run.log，
-//         也没有 config.ini；只有显式加 --config 时才在 exe 同目录读写 config.ini。
-// Debug  （-DEQL_DEBUG，EndfieldQuickLaunch-debug.exe）：日志和 %LOCALAPPDATA% 下的配置
-//         都写，方便排查；同样可以用 --config 改成便携模式。
-// 日志部分在 Release 里根本不参与编译（不是运行期判断），所以不存在漏写的可能。
-#ifdef EQL_DEBUG
-#define EQL_DISK 1
-#else
-#define EQL_DISK 0
-#endif
+// 默认一个字节都不写盘：没有日志，也没有 config.ini。
+//   --debug   把本次输出写到 exe 同目录的 last-run.log（排查用，看完随手删）
+//   --config  exe 同目录的 config.ini，缓存游戏/启动器路径（便携模式）
+// 两个都是运行期开关，程序不会记住它们，也不会往别的地方写任何东西。
 
 // ---------------------------------------------------------------- 控制台输出
 //
 // 本程序以 GUI 子系统编译（双击运行不会有黑框），所以输出分三种情况：
 //   1. 已经连着控制台（从 cmd / PowerShell 启动）-> 直接 WriteConsoleW
 //   2. 标准输出被重定向到文件 / 管道  -> 写 UTF-8 字节
-//   3. 什么都没有（双击启动）        -> 直接丢弃；Debug 构建缓存后写 last-run.log
+//   3. 什么都没有（双击启动）        -> --debug 时缓存，退出时写到 exe 同目录的 last-run.log
 static bool g_hasConsole = false;
-#if EQL_DISK
-static std::wstring g_captured;
-#endif
+static bool g_debugLog = false;    // --debug：本次运行留日志
+static std::wstring g_captured;    // 只在 g_debugLog 为真时累积
+
+static fs::path ModulePath();      // 定义在后面，日志要用它定位 exe 目录
 
 static std::string ToUtf8(const std::wstring& text) {
     if (text.empty()) return std::string();
@@ -80,8 +75,8 @@ static void InitOutput() {
         const DWORD type = GetFileType(output);
         if (type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE) return;  // 重定向，直接写句柄
     }
-    // 双击启动时父进程（explorer）没有控制台，这里会失败：Debug 构建退化为只写日志，
-    // Release 构建则什么都不写。
+    // 双击启动时父进程（explorer）没有控制台，这里会失败：--debug 时就只留日志，
+    // 否则什么都不写。
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
     const HANDLE console = CreateFileW(L"CONOUT$",
         GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -94,6 +89,7 @@ static void InitOutput() {
 
 static void Print(const std::wstring& text) {
     if (text.empty()) return;
+    if (g_debugLog) g_captured += text;   // --debug：控制台上显示过的也留一份
     if (g_hasConsole) {
         DWORD written = 0;
         if (WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), text.c_str(),
@@ -106,27 +102,17 @@ static void Print(const std::wstring& text) {
         GetFileType(output) != FILE_TYPE_CHAR) {
         DWORD written = 0;
         WriteFile(output, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
-        return;
     }
-#if EQL_DISK
-    g_captured += text;   // 没地方可写（或控制台写失败）就先存着，退出时落日志
-#endif
 }
 
 static void PrintLine(const std::wstring& text = L"") { Print(text + L"\n"); }
 
-#if EQL_DISK
-// 双击启动时没有任何窗口：把这次运行的输出落到日志文件里，方便排查。
-// 任何时候都不弹窗（成功失败都静默），需要看输出时从 cmd / PowerShell 运行，
-// 或者打开 %LOCALAPPDATA%\EndfieldQuickLaunch\last-run.log。
+// --debug 时把这次运行的全部输出写到 exe 同目录的 last-run.log。
+// 写不进去（目录只读之类）就安静放弃，日志不该影响启动本身。
 static void WriteRunLog(const std::wstring& text) {
-    wchar_t localAppData[32768]{};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData,
-            static_cast<DWORD>(std::size(localAppData)))) return;
-    const fs::path directory = fs::path(localAppData) / L"EndfieldQuickLaunch";
-    std::error_code ec;
-    fs::create_directories(directory, ec);
-    const fs::path file = directory / L"last-run.log";
+    const auto self = ModulePath();
+    if (self.empty()) return;
+    const fs::path file = self.parent_path() / L"last-run.log";
     FILE* stream = nullptr;
     if (_wfopen_s(&stream, file.c_str(), L"wb") != 0 || !stream) return;
     // UTF-8 BOM，记事本打开不乱码
@@ -136,14 +122,9 @@ static void WriteRunLog(const std::wstring& text) {
     if (!utf8.empty()) fwrite(utf8.data(), 1, utf8.size(), stream);
     fclose(stream);
 }
-#endif
 
 static int Finish(int code) {
-#if EQL_DISK
-    // 控制台正常时 g_captured 一直是空的，只有"没地方显示"的那部分内容才会落到日志里。
-    if (!g_captured.empty()) WriteRunLog(g_captured);
-    g_captured.clear();
-#endif
+    if (g_debugLog && !g_captured.empty()) WriteRunLog(g_captured);
     return code;
 }
 
@@ -664,10 +645,9 @@ static fs::path FindGameExecutable() {
 
 // ---------------------------------------------------------------- 配置文件
 //
-// 缓存位置只由 --config 决定，两个构建行为一致：
+// 缓存位置只由 --config 决定：
 //   加了 --config -> exe 同目录的 config.ini（便携模式，双击/快捷方式都能带上）
-//   没加          -> Debug 用 %LOCALAPPDATA%\EndfieldQuickLaunch\config.ini；
-//                    Release 什么都不读写，每次都重新自动扫描。
+//   没加          -> 什么都不读写，每次启动重新自动扫描。
 // g_configPath 为空是统一的“不启用缓存”状态，所有读写都在这里短路。
 
 static fs::path g_configPath;
@@ -692,19 +672,10 @@ static void WriteConfig(const wchar_t* key, const std::wstring& value) {
 }
 
 static void InitConfig(bool portable) {
-    if (portable) {
-        const auto self = ModulePath();
-        if (self.empty()) return;
-        g_configPath = self.parent_path() / L"config.ini";
-        return;
-    }
-#if EQL_DISK
-    wchar_t buffer[32768]{};
-    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer,
-        static_cast<DWORD>(std::size(buffer)));
-    if (length == 0 || length >= std::size(buffer)) return;
-    g_configPath = fs::path(buffer) / L"EndfieldQuickLaunch" / L"config.ini";
-#endif
+    if (!portable) return;
+    const auto self = ModulePath();
+    if (self.empty()) return;
+    g_configPath = self.parent_path() / L"config.ini";
 }
 
 // -------------------------------------------------------------- 进程操作封装
@@ -950,6 +921,7 @@ static void PrintUsage() {
     PrintLine(L"  --inject <dll>     启动后向游戏注入指定 DLL（可选）");
     PrintLine(L"  --inject-timeout <毫秒>  等待 GameAssembly.dll 的最长时间，默认 90000");
     PrintLine(L"  --config           读写 exe 同目录的 config.ini，缓存游戏/启动器路径");
+    PrintLine(L"  --debug            把本次输出写到 exe 同目录的 last-run.log");
     PrintLine(L"  --steam            设置 Steam 环境变量（覆盖层需自行处理）");
     PrintLine(L"  --diagnose         只诊断：列出找到的启动器、签名、游戏路径，不启动");
     PrintLine(L"  --dry-run          打印将要执行的命令行，不实际启动");
@@ -962,13 +934,8 @@ static void PrintUsage() {
     PrintLine(L"  EndfieldQuickLaunch.exe --game \"D:\\Games\\Endfield\\Endfield.exe\"");
     PrintLine(L"  EndfieldQuickLaunch.exe --dry-run");
     PrintLine();
-#if EQL_DISK
-    PrintLine(L"Debug 构建：配置与日志默认在 %LOCALAPPDATA%\\EndfieldQuickLaunch\\，"
-              L"加 --config 则改用 exe 同目录的 config.ini。");
-#else
-    PrintLine(L"Release 构建：不写日志；不加 --config 时不读写任何配置，"
-              L"运行后不在系统里留下任何文件。");
-#endif
+    PrintLine(L"默认不写任何文件；--debug 生成 last-run.log，--config 生成 config.ini，"
+              L"都放在 exe 同目录。");
 }
 
 static bool ParseOptions(int argc, wchar_t** argv, Options& options,
@@ -1009,6 +976,7 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& options,
         else if (option == L"--no-wait") options.noWait = true;
         else if (option == L"--force") options.force = true;
         else if (option == L"--config") options.config = true;
+        else if (option == L"--debug") continue;   // 入口处已预扫描，这里只是接受该参数
         else if (option == L"-h" || option == L"--help" || option == L"/?") options.help = true;
         else { error = L"未知参数: " + option; return false; }
     }
@@ -1068,6 +1036,10 @@ static int RunMain(int argc, wchar_t** argv) {
     PrintLine(L"=== Endfield Quick Launch ===");
     PrintLine(std::wstring(L"当前权限: ") + (IsElevated() ? L"管理员" : L"普通用户"));
     if (!g_configPath.empty()) PrintLine(L"配置文件: " + g_configPath.wstring());
+    if (g_debugLog) {
+        const auto self = ModulePath();
+        if (!self.empty()) PrintLine(L"日志文件: " + (self.parent_path() / L"last-run.log").wstring());
+    }
     PrintLine();
 
     // ---- 1. 找游戏
@@ -1335,6 +1307,13 @@ static int RunMain(int argc, wchar_t** argv) {
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    // 先认 --debug：参数写错时也照样留下日志，否则排查没线索。
+    // -- 之后的都是游戏参数，不能当成自己的开关。
+    for (int index = 1; argv && index < argc; ++index) {
+        const std::wstring argument = argv[index];
+        if (argument == L"--") break;
+        if (argument == L"--debug") { g_debugLog = true; break; }
+    }
     InitOutput();
 
     // 隐藏的看护模式：--keeper <父进程PID> <游戏PID>，完全静默，不弹任何窗口。

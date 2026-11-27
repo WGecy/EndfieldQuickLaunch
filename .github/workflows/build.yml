@@ -31,16 +31,14 @@ jobs:
       - name: Verify artifact
         shell: pwsh
         run: |
-          if (-not (Test-Path EndfieldQuickLaunch.exe)) { throw "release exe not produced" }
-          if (-not (Test-Path EndfieldQuickLaunch-debug.exe)) { throw "debug exe not produced" }
+          if (-not (Test-Path EndfieldQuickLaunch.exe)) { throw "exe not produced" }
           $f = Get-Item EndfieldQuickLaunch.exe
-          "release size = $($f.Length) bytes"
-          "debug   size = $((Get-Item EndfieldQuickLaunch-debug.exe).Length) bytes"
-          # release must not carry the run-log writer at all
-          # (config.ini is expected: --config is an opt-in portable cache in both builds)
+          "size = $($f.Length) bytes"
+          # the log path must be a run-time switch, not an always-on writer
           $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
           $text = [System.Text.Encoding]::Unicode.GetString($bytes)
-          if ($text.Contains('last-run.log')) { throw "release build still contains 'last-run.log'" }
+          if (-not $text.Contains('last-run.log')) { throw "exe lost the --debug log path" }
+          if (-not $text.Contains('config.ini')) { throw "exe lost the --config cache path" }
           # sanity: must be a PE image
           $fs = [System.IO.File]::OpenRead($f.FullName)
           $buf = New-Object byte[] 2
@@ -58,9 +56,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: EndfieldQuickLaunch-mingw-x64
-          path: |
-            EndfieldQuickLaunch.exe
-            EndfieldQuickLaunch-debug.exe
+          path: EndfieldQuickLaunch.exe
           if-no-files-found: error
 
   release:
@@ -76,6 +72,4 @@ jobs:
           name: EndfieldQuickLaunch-mingw-x64
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            EndfieldQuickLaunch.exe
-            EndfieldQuickLaunch-debug.exe
+          files: EndfieldQuickLaunch.exe
